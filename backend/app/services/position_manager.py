@@ -63,6 +63,13 @@ class PositionManager:
 
             synced_positions.append(pos)
 
+        active_symbols = {ep.product_symbol for ep in exchange_positions}
+        for p in db.query(Position).all():
+            if p.instrument not in active_symbols and p.size != 0.0:
+                p.size = 0.0
+                p.unrealized_pnl = 0.0
+                p.updated_at = now
+
         db.commit()
         runtime_state.last_reconciliation_time = now.isoformat()
         return synced_positions
@@ -103,6 +110,41 @@ class PositionManager:
             timestamp=datetime.now(timezone.utc),
         )
         db.add(trade)
+
+        # Update or create Position record
+        now_dt = datetime.now(timezone.utc)
+        if not pos:
+            new_pos_size = fill_qty if order.side == "buy" else -fill_qty
+            pos = Position(
+                instrument=order.instrument,
+                size=round(new_pos_size, 4),
+                entry_price=fill_price,
+                mark_price=fill_price,
+                unrealized_pnl=0.0,
+                realized_pnl=round(realized_pnl, 2),
+                updated_at=now_dt,
+            )
+            db.add(pos)
+        else:
+            if order.side == "buy":
+                if prev_size >= 0:
+                    new_size = prev_size + fill_qty
+                    new_entry = (prev_entry * prev_size + fill_price * fill_qty) / new_size if new_size > 0 else fill_price
+                else:
+                    new_size = prev_size + fill_qty
+                    new_entry = prev_entry if new_size < 0 else (fill_price if new_size > 0 else 0.0)
+            else:  # sell
+                if prev_size <= 0:
+                    new_size = prev_size - fill_qty
+                    new_entry = (prev_entry * abs(prev_size) + fill_price * fill_qty) / abs(new_size) if abs(new_size) > 0 else fill_price
+                else:
+                    new_size = prev_size - fill_qty
+                    new_entry = prev_entry if new_size > 0 else (fill_price if new_size < 0 else 0.0)
+            pos.size = round(new_size, 4)
+            pos.entry_price = round(new_entry, 2)
+            pos.mark_price = fill_price
+            pos.realized_pnl = round((pos.realized_pnl or 0.0) + realized_pnl, 2)
+            pos.updated_at = now_dt
 
         if realized_pnl != 0.0:
             runtime_state.add_realized_pnl(realized_pnl)

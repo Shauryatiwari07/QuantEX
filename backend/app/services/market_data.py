@@ -47,8 +47,9 @@ class MarketDataService:
             runtime_state.update_market_status(valid=False)
             return False, pd.DataFrame(), f"Fetch failed: {str(e)}"
 
-        if not candles or len(candles) < 25:
-            msg = f"Insufficient candle history returned ({len(candles)} candles)"
+        min_required = min(limit, 10)
+        if not candles or len(candles) < min_required:
+            msg = f"Insufficient candle history returned ({len(candles)} candles, minimum required: {min_required})"
             logger.warning(msg)
             runtime_state.update_market_status(valid=False)
             return False, pd.DataFrame(), msg

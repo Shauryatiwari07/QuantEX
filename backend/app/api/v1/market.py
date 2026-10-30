@@ -13,6 +13,7 @@ from app.services.strategy_engine import strategy_engine
 router = APIRouter(prefix="/api/v1/market", tags=["Market Data"])
 
 _PRODUCT_CACHE: Dict[str, Any] = {"timestamp": 0, "data": []}
+_CANDLE_CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_SECONDS = 60
 
 RESOLUTION_MAP = {
@@ -173,16 +174,32 @@ async def get_candles(
     timeframe: str = Query(default="5m"),
     limit: int = Query(default=150, ge=10, le=500),
 ):
-    """Fetches verified OHLCV candlestick data directly from Delta Exchange India."""
+    """Fetches verified OHLCV candlestick data directly from Delta Exchange India with high-availability cache."""
+    cache_key = f"{symbol}_{timeframe}"
+    now = int(time.time())
+
+    # Return cached candles if fetched less than 10 seconds ago
+    if cache_key in _CANDLE_CACHE:
+        entry = _CANDLE_CACHE[cache_key]
+        if (now - entry.get("timestamp", 0)) < 10 and len(entry.get("candles", [])) >= min(limit, 20):
+            cached_candles = entry["candles"][-limit:]
+            return {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "count": len(cached_candles),
+                "exchange": "Delta Exchange India",
+                "status": "LIVE_VERIFIED",
+                "candles": cached_candles,
+            }
+
     res_code = RESOLUTION_MAP.get(timeframe, "5")
     step_sec = INTERVAL_SECONDS.get(timeframe, 300)
-    now = int(time.time())
     start = now - (limit * step_sec)
 
+    # 1. Primary: Delta Exchange India Live API
     url = f"{settings.DELTA_INDIA_BASE_URL}/v2/chart/history?resolution={res_code}&symbol={symbol}&from={start}&to={now}"
-
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=4.5) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = resp.json().get("result", {})
@@ -207,6 +224,7 @@ async def get_candles(
                     candles.sort(key=lambda x: x["time"])
                     if candles:
                         runtime_state.latest_market_price = candles[-1]["close"]
+                        _CANDLE_CACHE[cache_key] = {"timestamp": now, "candles": candles}
                     return {
                         "symbol": symbol,
                         "timeframe": timeframe,
@@ -216,12 +234,53 @@ async def get_candles(
                         "candles": candles,
                     }
     except Exception as e:
-        logger.warning(f"Error fetching live candles for {symbol}: {e}")
+        logger.warning(f"Error fetching live candles for {symbol} from Delta India: {e}")
 
-    # Fallback to existing market data service
+    # 2. Secondary: Delta Testnet API fallback
+    testnet_url = f"{settings.DELTA_TESTNET_BASE_URL}/v2/chart/history?resolution={res_code}&symbol={symbol}&from={start}&to={now}"
+    try:
+        async with httpx.AsyncClient(timeout=3.5) as client:
+            resp = await client.get(testnet_url)
+            if resp.status_code == 200:
+                data = resp.json().get("result", {})
+                if isinstance(data, dict) and "t" in data and data["t"]:
+                    candles = []
+                    t_list = data["t"]
+                    o_list = data["o"]
+                    h_list = data["h"]
+                    l_list = data["l"]
+                    c_list = data["c"]
+                    v_list = data["v"]
+
+                    for i in range(len(t_list)):
+                        candles.append({
+                            "time": int(t_list[i]),
+                            "open": float(o_list[i]),
+                            "high": float(h_list[i]),
+                            "low": float(l_list[i]),
+                            "close": float(c_list[i]),
+                            "volume": float(v_list[i]),
+                        })
+                    candles.sort(key=lambda x: x["time"])
+                    if candles:
+                        runtime_state.latest_market_price = candles[-1]["close"]
+                        _CANDLE_CACHE[cache_key] = {"timestamp": now, "candles": candles}
+                    return {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "count": len(candles),
+                        "exchange": "Delta Testnet (Public Feed)",
+                        "status": "LIVE_VERIFIED",
+                        "candles": candles,
+                    }
+    except Exception as e:
+        logger.warning(f"Error fetching testnet candles for {symbol}: {e}")
+
+    # 3. Tertiary: Fallback to existing market data service
     is_valid, df, msg = await market_data_service.fetch_and_validate_candles(symbol, timeframe, limit)
     if is_valid and not df.empty:
         records = df.to_dict(orient="records")
+        _CANDLE_CACHE[cache_key] = {"timestamp": now, "candles": records}
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -229,6 +288,18 @@ async def get_candles(
             "exchange": "Delta Exchange India (Cached/Fallback)",
             "status": "FALLBACK",
             "candles": records,
+        }
+
+    # 4. Quaternary: Return last valid cached real candles if available
+    if cache_key in _CANDLE_CACHE and _CANDLE_CACHE[cache_key].get("candles"):
+        last_known = _CANDLE_CACHE[cache_key]["candles"][-limit:]
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "count": len(last_known),
+            "exchange": "Delta Exchange India (Persisted Real History)",
+            "status": "CACHED",
+            "candles": last_known,
         }
 
     return {

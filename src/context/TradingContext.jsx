@@ -344,7 +344,7 @@ export const TradingProvider = ({ children }) => {
       const newPos = {
         id: `POS-${Math.floor(1000 + Math.random() * 9000)}`,
         symbol: orderData.symbol,
-        side: orderData.side,
+        side: (orderData.side === 'BUY' || orderData.side === 'LONG') ? 'LONG' : 'SHORT',
         size: `${orderData.quantity} ${orderData.symbol.split('/')[0]}`,
         entryPrice: orderData.price,
         currentPrice: orderData.price,

@@ -372,13 +372,31 @@ export const api = {
     let ws = null;
     let isClosedByUser = false;
     let reconnectTimeout = null;
+    let attemptIndex = 0;
+    const WS_SERVERS = [
+      'wss://public-socket.india.delta.exchange',
+      'wss://socket.testnet.deltaex.org',
+    ];
 
-    const channelName = timeframe === '1m' ? 'candlestick_1m' : (timeframe === '15m' ? 'candlestick_15m' : 'candlestick_5m');
+    const tfMap = {
+      '1m': 'candlestick_1m',
+      '3m': 'candlestick_3m',
+      '5m': 'candlestick_5m',
+      '15m': 'candlestick_15m',
+      '30m': 'candlestick_30m',
+      '1h': 'candlestick_1h',
+      '4h': 'candlestick_4h',
+      '1d': 'candlestick_1d',
+      '1D': 'candlestick_1d',
+    };
+    const channelName = tfMap[timeframe] || 'candlestick_5m';
 
     const connect = () => {
+      if (isClosedByUser) return;
       try {
         onStatus && onStatus('CONNECTING');
-        ws = new WebSocket(DELTA_WS_URL);
+        const serverUrl = WS_SERVERS[attemptIndex % WS_SERVERS.length];
+        ws = new WebSocket(serverUrl);
 
         ws.onopen = () => {
           onStatus && onStatus('CONNECTED');
@@ -387,6 +405,7 @@ export const api = {
             payload: {
               channels: [
                 { name: channelName, symbols: [symbol] },
+                { name: 'v2/ticker', symbols: [symbol] },
                 { name: 'ticker', symbols: [symbol] },
               ],
             },
@@ -399,8 +418,10 @@ export const api = {
             const data = JSON.parse(event.data);
             if (data.c && data.o && data.h && data.l) {
               // Candlestick update
+              const rawTime = data.cst || data.ts || data.time;
+              const candleTime = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
               onCandle && onCandle({
-                time: Math.floor((data.cst || data.ts) / 1000000),
+                time: candleTime,
                 open: parseFloat(data.o),
                 high: parseFloat(data.h),
                 low: parseFloat(data.l),
@@ -415,6 +436,7 @@ export const api = {
                 high: parseFloat(data.high || 0),
                 low: parseFloat(data.low || 0),
                 volume: parseFloat(data.volume || 0),
+                change_24h: data.mark_change_24h ? parseFloat(data.mark_change_24h) * 100 : undefined,
               });
             }
           } catch {
@@ -423,19 +445,22 @@ export const api = {
         };
 
         ws.onerror = () => {
-          onStatus && onStatus('ERROR');
+          onStatus && onStatus('RECONNECTING');
         };
 
         ws.onclose = () => {
           if (!isClosedByUser) {
+            attemptIndex++;
             onStatus && onStatus('RECONNECTING');
-            reconnectTimeout = setTimeout(connect, 3000);
+            reconnectTimeout = setTimeout(connect, 2500);
           } else {
             onStatus && onStatus('DISCONNECTED');
           }
         };
       } catch {
-        onStatus && onStatus('ERROR');
+        onStatus && onStatus('RECONNECTING');
+        attemptIndex++;
+        reconnectTimeout = setTimeout(connect, 3000);
       }
     };
 

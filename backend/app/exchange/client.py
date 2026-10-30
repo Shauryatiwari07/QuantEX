@@ -510,14 +510,23 @@ class DeltaExchangeClient:
         if not self.use_live:
             res = []
             for k, pos in self._sim_positions.items():
+                size = float(pos.get("size", 0.0))
+                if abs(size) < 1e-6:
+                    continue
+                entry = float(pos.get("entry_price", 0.0))
+                mark = float(self._sim_price or entry)
+                if size > 0:
+                    u_pnl = (mark - entry) * size
+                else:
+                    u_pnl = (entry - mark) * abs(size)
                 res.append(
                     ExchangePosition(
                         product_symbol=pos["product_symbol"],
-                        size=pos["size"],
-                        entry_price=pos["entry_price"],
-                        mark_price=pos["mark_price"],
-                        unrealized_pnl=pos["unrealized_pnl"],
-                        realized_pnl=pos["realized_pnl"],
+                        size=size,
+                        entry_price=entry,
+                        mark_price=mark,
+                        unrealized_pnl=round(u_pnl, 2),
+                        realized_pnl=float(pos.get("realized_pnl", 0.0)),
                     )
                 )
             return res
